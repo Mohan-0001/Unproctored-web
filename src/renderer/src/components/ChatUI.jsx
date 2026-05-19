@@ -1,84 +1,152 @@
 import { useState, useEffect, useRef } from 'react'
-import { Settings, Mic, Send, X, Layers, Moon, Sun, Command } from 'lucide-react'
-// import { ChatGroq } from '@langchain/groq'
-import { ChatGoogleGenerativeAI } from "@langchain/google-genai"
-import { HumanMessage, SystemMessage, AIMessage } from '@langchain/core/messages'
+import { Settings, Mic, Send, X, Layers, Moon, Sun, Command, Check, Copy as CopyIcon } from 'lucide-react'
+import { ChatGoogleGenerativeAI } from '@langchain/google-genai'
+import { HumanMessage, AIMessage, SystemMessage } from '@langchain/core/messages'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
-import { Check, Copy as CopyIcon } from 'lucide-react'
 
-const ChatUI = () => {
-  const [isDarkMode, setIsDarkMode] = useState(false)
+// ─── Code block with copy button ─────────────────────────────────────────────
+const CodeBlock = ({ language, value }) => {
+  const [copied, setCopied] = useState(false)
+  const handleCopy = () => {
+    navigator.clipboard.writeText(value)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+  return (
+    <div className="relative group my-4 rounded-lg overflow-hidden border border-gray-200 dark:border-gray-800 shadow-sm">
+      <div className="flex items-center justify-between px-4 py-2 bg-gray-100 dark:bg-[#1e1e1e] border-b border-gray-200 dark:border-gray-800">
+        <span className="text-xs font-mono text-gray-500 dark:text-gray-400 uppercase">
+          {language || 'code'}
+        </span>
+        <button
+          onClick={handleCopy}
+          className="flex items-center space-x-1.5 text-gray-500 dark:text-gray-400 hover:text-blue-500 dark:hover:text-blue-400 transition-colors"
+        >
+          {copied ? <Check size={14} /> : <CopyIcon size={14} />}
+          <span className="text-xs font-medium">{copied ? 'Copied!' : 'Copy'}</span>
+        </button>
+      </div>
+      <SyntaxHighlighter
+        language={language || 'text'}
+        style={vscDarkPlus}
+        customStyle={{ margin: 0, padding: '1rem', fontSize: '0.9rem', lineHeight: '1.5', background: 'transparent' }}
+      >
+        {value}
+      </SyntaxHighlighter>
+    </div>
+  )
+}
+
+// ─── Main ChatUI component ────────────────────────────────────────────────────
+/**
+ * @param {{ isDarkMode: boolean, onToggleDark: () => void, onOpenSettings: () => void }} props
+ */
+const ChatUI = ({ isDarkMode, onToggleDark, onOpenSettings }) => {
   const [messages, setMessages] = useState([])
   const [inputText, setInputText] = useState('')
   const [screenshots, setScreenshots] = useState([])
   const [isStreaming, setIsStreaming] = useState(false)
-  const [apiKey, setApiKey] = useState(localStorage.getItem('groq_api_key') || '')
-  const [showSettings, setShowSettings] = useState(false)
   const [isProtected, setIsProtected] = useState(false)
-
-  // Ghost Typing Mode states
   const [isTypingMode, setIsTypingMode] = useState(false)
   const [ghostText, setGhostText] = useState('')
+  // Gemini API keys loaded from store (up to 2)
+  const [geminiApiKeys, setGeminiApiKeys] = useState(['', ''])
 
   const messagesEndRef = useRef(null)
   const textareaRef = useRef(null)
   const handleSendRef = useRef(null)
   const scrollContainerRef = useRef(null)
 
-  const handleSend = async () => {
+  // Load settings (API keys) from main process store on mount
+  useEffect(() => {
+    if (window.api?.loadSettings) {
+      window.api.loadSettings().then((settings) => {
+        if (settings?.geminiApiKeys) setGeminiApiKeys(settings.geminiApiKeys)
+      })
+    }
+  }, [])
+
+  // Active API key = first non-empty stored key
+  const activeApiKey = geminiApiKeys.find((k) => k && k.trim()) || ''
+
+  // ── Event listeners from main process ──────────────────────────────────────
+  useEffect(() => {
+    if (!window.api?.onScreenshotCaptured) return
+    return window.api.onScreenshotCaptured((img) => setScreenshots((prev) => [...prev, img]))
+  }, [])
+
+  useEffect(() => {
+    if (!window.api?.onProtectionToggled) return
+    return window.api.onProtectionToggled((val) => setIsProtected(val))
+  }, [])
+
+  useEffect(() => {
+    if (!window.api) return
+    const c1 = window.api.onTypingModeToggled((toggled) => {
+      setIsTypingMode(toggled)
+      if (toggled) setGhostText('')
+    })
+    const c2 = window.api.onUpdateText((text) => {
+      setInputText(text)
+      setGhostText(text)
+    })
+    const c3 = window.api.onTriggerSend(() => {
+      handleSendRef.current?.()
+    })
+    const c4 = window.api.onScrollUI((amount) => {
+      scrollContainerRef.current?.scrollBy({ top: amount, behavior: 'smooth' })
+    })
+    return () => { c1?.(); c2?.(); c3?.(); c4?.() }
+  }, [])
+
+  // Keep ref in sync so trigger-send always calls latest handleSend
+  useEffect(() => { handleSendRef.current = handleSend }, [handleSend])
+
+  // Auto-focus textarea when ghost typing starts
+  useEffect(() => {
+    if (isTypingMode) textareaRef.current?.focus()
+  }, [isTypingMode])
+
+  // Scroll to bottom on new messages
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
+
+  // ── Send handler ────────────────────────────────────────────────────────────
+  async function handleSend() {
     if (!inputText.trim() && screenshots.length === 0) return
-    if (!apiKey) {
-      alert('Please set your Groq API Key in settings first.')
-      setShowSettings(true)
+    if (!activeApiKey) {
+      onOpenSettings()
       return
     }
 
-    const newUserMsg = {
-      role: 'user',
-      text: inputText,
-      images: screenshots
-    }
-
+    const newUserMsg = { role: 'user', text: inputText, images: screenshots }
     setMessages((prev) => [...prev, newUserMsg])
     setInputText('')
     setGhostText('')
     setScreenshots([])
     setIsStreaming(true)
+    window.api?.resetTypingBuffer()
+    if (textareaRef.current) textareaRef.current.style.height = '44px'
 
-    // Reset global typing buffer
-    if (window.api && window.api.resetTypingBuffer) {
-      window.api.resetTypingBuffer();
-    }
-
-    // Reset textarea height
-    if (textareaRef.current) {
-      textareaRef.current.style.height = '44px';
-    }
-
-    // Add empty AI message to stream into
     setMessages((prev) => [...prev, { role: 'ai', text: '' }])
 
     try {
       const chat = new ChatGoogleGenerativeAI({
-        model: "gemini-2.5-flash-lite",
+        model: 'gemini-2.5-flash',
         temperature: 0,
         maxRetries: 2,
-        apiKey: apiKey,
+        apiKey: activeApiKey,
         streaming: true
       })
 
-      // Format history with images for vision support
       const history = messages.map((m) => {
         if (m.role === 'user') {
           const content = [{ type: 'text', text: m.text || 'Look at these images.' }]
-          if (m.images && m.images.length > 0) {
-            m.images.forEach((img) => {
-              content.push({ type: 'image_url', image_url: { url: img } })
-            })
-          }
+          m.images?.forEach((img) => content.push({ type: 'image_url', image_url: { url: img } }))
           return new HumanMessage({ content })
         } else if (m.role === 'ai') {
           return new AIMessage(m.text)
@@ -86,162 +154,74 @@ const ChatUI = () => {
         return new SystemMessage(m.text)
       })
 
-      // Prepare current message with images
       const currentContent = [{ type: 'text', text: newUserMsg.text || 'Analyze this.' }]
-      if (newUserMsg.images && newUserMsg.images.length > 0) {
-        newUserMsg.images.forEach((img) => {
-          currentContent.push({ type: 'image_url', image_url: { url: img } })
-        })
-      }
+      newUserMsg.images?.forEach((img) =>
+        currentContent.push({ type: 'image_url', image_url: { url: img } })
+      )
       history.push(new HumanMessage({ content: currentContent }))
 
       const stream = await chat.stream(history)
-
-      let accumulatedText = ''
+      let accumulated = ''
       for await (const chunk of stream) {
-        accumulatedText += chunk.content
+        accumulated += chunk.content
         setMessages((prev) => {
-          const newMessages = [...prev]
-          newMessages[newMessages.length - 1].text = accumulatedText
-          return newMessages
+          const updated = [...prev]
+          updated[updated.length - 1] = { ...updated[updated.length - 1], text: accumulated }
+          return updated
         })
       }
-    } catch (error) {
-      console.error(error)
+    } catch (err) {
+      console.error('[ChatUI] stream error:', err)
       setMessages((prev) => {
-        const newMessages = [...prev]
-        newMessages[newMessages.length - 1].text = 'Error connecting to AI: ' + error.message
-        return newMessages
+        const updated = [...prev]
+        updated[updated.length - 1] = {
+          ...updated[updated.length - 1],
+          text: '⚠️ Error connecting to Gemini: ' + err.message
+        }
+        return updated
       })
     } finally {
       setIsStreaming(false)
     }
   }
 
-  useEffect(() => {
-    if (isDarkMode) {
-      document.documentElement.classList.add('dark')
-    } else {
-      document.documentElement.classList.remove('dark')
-    }
-  }, [isDarkMode])
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
-
-  useEffect(() => {
-    if (window.api && window.api.onScreenshotCaptured) {
-      window.api.onScreenshotCaptured((imgDataUrl) => {
-        setScreenshots((prev) => [...prev, imgDataUrl])
-      })
-    }
-  }, [])
-
-  useEffect(() => {
-    if (window.api && window.api.onProtectionToggled) {
-      window.api.onProtectionToggled((value) => {
-        setIsProtected(value)
-      })
-    }
-  }, [])
-
-  // Keep handleSendRef updated
-  useEffect(() => {
-    handleSendRef.current = handleSend
-  }, [handleSend])
-
-  // Ghost Typing Mode Listener
-  useEffect(() => {
-    if (!window.api) return;
-
-    window.api.onTypingModeToggled((isToggled) => {
-      setIsTypingMode(isToggled);
-      if (isToggled) {
-        setGhostText('');
-      }
-    });
-
-    window.api.onUpdateText((text) => {
-      setInputText(text);
-      setGhostText(text);
-    });
-
-    window.api.onTriggerSend(() => {
-      if (handleSendRef.current) handleSendRef.current();
-    });
-
-    window.api.onScrollUI((amount) => {
-      if (scrollContainerRef.current) {
-        scrollContainerRef.current.scrollBy({
-          top: amount,
-          behavior: 'smooth'
-        });
-      }
-    });
-  }, []);
-
-  // Auto-focus textarea when Ghost Typing is active
-  useEffect(() => {
-    if (isTypingMode && textareaRef.current) {
-      textareaRef.current.focus();
-    }
-  }, [isTypingMode]);
-
-
-  const handleSaveSettings = (e) => {
-    e.preventDefault()
-    localStorage.setItem('groq_api_key', apiKey)
-    setShowSettings(false)
-  }
-
-  // Custom CodeBlock component for Markdown
-  const CodeBlock = ({ language, value }) => {
-    const [copied, setCopied] = useState(false)
-
-    const handleCopy = () => {
-      navigator.clipboard.writeText(value)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    }
-
-    return (
-      <div className="relative group my-4 rounded-lg overflow-hidden border border-gray-200 dark:border-gray-800 shadow-sm">
-        <div className="flex items-center justify-between px-4 py-2 bg-gray-100 dark:bg-[#1e1e1e] border-b border-gray-200 dark:border-gray-800">
-          <span className="text-xs font-mono text-gray-500 dark:text-gray-400 uppercase">{language || 'code'}</span>
-          <button
-            onClick={handleCopy}
-            className="flex items-center space-x-1.5 text-gray-500 dark:text-gray-400 hover:text-blue-500 dark:hover:text-blue-400 transition-colors"
-          >
-            {copied ? <Check size={14} /> : <CopyIcon size={14} />}
-            <span className="text-xs font-medium">{copied ? 'Copied!' : 'Copy'}</span>
-          </button>
-        </div>
-        <SyntaxHighlighter
-          language={language || 'text'}
-          style={vscDarkPlus}
-          customStyle={{
-            margin: 0,
-            padding: '1rem',
-            fontSize: '0.9rem',
-            lineHeight: '1.5',
-            background: 'transparent',
-          }}
-        >
-          {value}
-        </SyntaxHighlighter>
-      </div>
+  // ── Markdown render components ──────────────────────────────────────────────
+  const mdComponents = {
+    code({ node, inline, className, children, ...props }) {
+      const match = /language-(\w+)/.exec(className || '')
+      return !inline && match ? (
+        <CodeBlock language={match[1]} value={String(children).replace(/\n$/, '')} {...props} />
+      ) : (
+        <code className={`${className} bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded text-sm font-mono`} {...props}>
+          {children}
+        </code>
+      )
+    },
+    p: ({ children }) => <p className="mb-4 last:mb-0 leading-relaxed">{children}</p>,
+    ul: ({ children }) => <ul className="list-disc pl-5 mb-4 space-y-2">{children}</ul>,
+    ol: ({ children }) => <ol className="list-decimal pl-5 mb-4 space-y-2">{children}</ol>,
+    li: ({ children }) => <li className="text-[15px]">{children}</li>,
+    h1: ({ children }) => <h1 className="text-2xl font-bold mb-4 mt-6 first:mt-0">{children}</h1>,
+    h2: ({ children }) => <h2 className="text-xl font-bold mb-3 mt-5 first:mt-0">{children}</h2>,
+    h3: ({ children }) => <h3 className="text-lg font-bold mb-2 mt-4 first:mt-0">{children}</h3>,
+    blockquote: ({ children }) => (
+      <blockquote className="border-l-4 border-gray-200 dark:border-gray-700 pl-4 italic my-4 text-gray-500">
+        {children}
+      </blockquote>
     )
   }
 
+  // ── Render ──────────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col h-screen relative items-center pt-4 w-full">
-      {/* Floating Top Bar (Interview Coder / Cluely style) */}
+
+      {/* ── Floating Top Bar ── */}
       <div className="absolute top-4 z-50 flex items-center bg-white/70 dark:bg-[#1a1a1a]/70 backdrop-blur-md shadow-[0_4px_20px_rgba(0,0,0,0.08)] dark:shadow-[0_4px_20px_rgba(0,0,0,0.4)] rounded-full px-2 py-1.5 border border-gray-100/50 dark:border-gray-800/50 space-x-2 w-max">
-        {/* Recording / Time indicator */}
+
+        {/* Recording dot */}
         <div className="flex items-center space-x-1.5 bg-[#FF3B30] text-white px-3 py-1.5 rounded-full text-xs font-semibold tracking-wide">
-          <div className="w-2 h-2 bg-white rounded-full animate-pulse"></div>
-          <span>13:32</span>
+          <div className="w-2 h-2 bg-white rounded-full animate-pulse" />
+          <span>LIVE</span>
         </div>
 
         <button className="flex items-center space-x-2 hover:bg-gray-100 dark:hover:bg-gray-800 px-3 py-1.5 rounded-full transition-colors text-gray-700 dark:text-gray-300">
@@ -262,99 +242,76 @@ const ChatUI = () => {
               <Command size={12} />
             </div>
             <div className="flex items-center justify-center bg-gray-100 dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 w-5 h-5 text-xs font-bold">
-              \
+              M
             </div>
           </div>
         </button>
 
+        {/* Status badges */}
         {isProtected && (
           <div className="flex items-center space-x-1.5 bg-purple-500/80 backdrop-blur text-white px-3 py-1.5 rounded-full text-xs font-semibold tracking-wide border border-purple-400/50">
             <span>Ghost Mode</span>
           </div>
         )}
-
         {isTypingMode && (
           <div className="flex items-center space-x-1.5 bg-orange-500/90 text-white px-3 py-1.5 rounded-full text-xs font-semibold tracking-wide border border-orange-400/50">
-            <div className="w-2 h-2 bg-white rounded-full animate-pulse"></div>
-            <span>GHOST TYPING ACTIVE</span>
+            <div className="w-2 h-2 bg-white rounded-full animate-pulse" />
+            <span>GHOST TYPING</span>
+          </div>
+        )}
+        {!activeApiKey && (
+          <div className="flex items-center space-x-1.5 bg-red-500/80 text-white px-3 py-1.5 rounded-full text-xs font-semibold tracking-wide border border-red-400/50">
+            <span>No API Key</span>
           </div>
         )}
 
-        <div className="h-4 w-px bg-gray-200 dark:bg-gray-700 mx-1"></div>
+        <div className="h-4 w-px bg-gray-200 dark:bg-gray-700 mx-1" />
 
+        {/* Settings button — opens Settings view */}
         <button
-          onClick={() => setShowSettings(!showSettings)}
+          onClick={onOpenSettings}
           className="p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full transition-colors text-gray-500 dark:text-gray-400"
+          title="Settings"
         >
           <Settings size={16} />
         </button>
+
+        {/* Theme toggle */}
         <button
-          onClick={() => setIsDarkMode(!isDarkMode)}
+          onClick={onToggleDark}
           className="p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full transition-colors text-gray-500 dark:text-gray-400"
+          title="Toggle theme"
         >
           {isDarkMode ? <Sun size={16} /> : <Moon size={16} />}
         </button>
       </div>
 
-      {/* Settings Modal */}
-      {showSettings && (
-        <div className="absolute top-20 z-50 bg-white/80 dark:bg-[#1a1a1a]/80 backdrop-blur-lg p-4 rounded-xl shadow-xl border border-gray-200/50 dark:border-gray-800/50 w-80">
-          <h3 className="text-sm font-bold mb-3 dark:text-white">Settings</h3>
-          <form onSubmit={handleSaveSettings}>
-            <div className="mb-4">
-              <label className="block text-xs font-semibold text-gray-500 mb-1">Groq API Key</label>
-              <input
-                type="password"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                className="w-full bg-gray-50 dark:bg-[#222] border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 dark:text-white"
-                placeholder="gsk_..."
-              />
-            </div>
-            <button
-              type="submit"
-              className="w-full bg-blue-500 hover:bg-blue-600 text-white rounded-lg py-2 text-sm font-semibold transition-colors"
-            >
-              Save
-            </button>
-          </form>
-        </div>
-      )}
+      {/* ── Main Chat Container ── */}
+      <div className="w-full max-w-3xl flex-1 flex flex-col mt-[55px] mb-3 bg-white/60 dark:bg-[#1a1a1a]/60 backdrop-blur-md shadow-sm border border-gray-200/50 dark:border-gray-800/50 rounded-2xl overflow-hidden">
 
-      {/* Main Chat Container */}
-      <div className="w-full max-w-3xl flex-1 flex flex-col mt-[72px] mb-8 bg-white/60 dark:bg-[#1a1a1a]/60 backdrop-blur-md shadow-sm dark:shadow-none border border-gray-200/50 dark:border-gray-800/50 rounded-2xl overflow-hidden">
         {/* Chat History */}
         <div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-6 space-y-8">
           {messages.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full text-gray-400 dark:text-gray-500">
               <Layers size={48} className="mb-4 opacity-50" />
               <p className="font-medium">Ctrl+S to attach screenshot</p>
-              <p className="text-sm mt-2">Start typing to ask AI</p>
+              <p className="text-sm mt-2">Start typing to ask Gemini AI</p>
             </div>
           )}
 
-          {messages.map((msg, index) => (
-            <div
-              key={index}
-              className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
-            >
+          {messages.map((msg, idx) => (
+            <div key={idx} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
               {msg.role === 'user' ? (
                 <div className="max-w-[80%] bg-[#F2F2F7]/80 dark:bg-[#2C2C2E]/80 backdrop-blur-sm text-black dark:text-white px-5 py-3 rounded-2xl rounded-tr-sm">
-                  {msg.images && msg.images.length > 0 && (
+                  {msg.images?.length > 0 && (
                     <div className="flex flex-wrap gap-2 mb-2">
                       {msg.images.map((img, i) => (
-                        <img
-                          key={i}
-                          src={img}
-                          alt={`Screenshot ${i + 1}`}
-                          className="max-w-[calc(50%-4px)] h-auto rounded-lg border border-black/10 dark:border-white/10"
-                        />
+                        <img key={i} src={img} alt={`Screenshot ${i + 1}`}
+                          className="max-w-[calc(50%-4px)] h-auto rounded-lg border border-black/10 dark:border-white/10" />
                       ))}
                     </div>
                   )}
-                  {msg.text && (
-                    <p className="text-[15px] leading-relaxed whitespace-pre-wrap">{msg.text}</p>
-                  )}
+                  {msg.text && <p className="text-[15px] leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
                 </div>
               ) : (
                 <div className="max-w-[95%] w-full">
@@ -362,49 +319,19 @@ const ChatUI = () => {
                     <div className="flex items-center justify-center bg-gray-100 dark:bg-gray-800 p-1.5 rounded-md">
                       <Layers size={14} className="text-gray-600 dark:text-gray-400" />
                     </div>
-                    <span className="font-semibold text-[15px]">AI Response</span>
+                    <span className="font-semibold text-[15px]">Gemini</span>
                   </div>
                   <div className="pl-8 text-[15px] leading-relaxed text-gray-600 dark:text-gray-300">
                     {msg.text ? (
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        components={{
-                          code({ node, inline, className, children, ...props }) {
-                            const match = /language-(\w+)/.exec(className || '')
-                            return !inline && match ? (
-                              <CodeBlock
-                                language={match[1]}
-                                value={String(children).replace(/\n$/, '')}
-                                {...props}
-                              />
-                            ) : (
-                              <code className={`${className} bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded text-sm font-mono`} {...props}>
-                                {children}
-                              </code>
-                            )
-                          },
-                          p: ({ children }) => <p className="mb-4 last:mb-0 leading-relaxed">{children}</p>,
-                          ul: ({ children }) => <ul className="list-disc pl-5 mb-4 space-y-2">{children}</ul>,
-                          ol: ({ children }) => <ol className="list-decimal pl-5 mb-4 space-y-2">{children}</ol>,
-                          li: ({ children }) => <li className="text-[15px]">{children}</li>,
-                          h1: ({ children }) => <h1 className="text-2xl font-bold mb-4 mt-6 first:mt-0">{children}</h1>,
-                          h2: ({ children }) => <h2 className="text-xl font-bold mb-3 mt-5 first:mt-0">{children}</h2>,
-                          h3: ({ children }) => <h3 className="text-lg font-bold mb-2 mt-4 first:mt-0">{children}</h3>,
-                          blockquote: ({ children }) => (
-                            <blockquote className="border-l-4 border-gray-200 dark:border-gray-700 pl-4 italic my-4 text-gray-500">
-                              {children}
-                            </blockquote>
-                          ),
-                        }}
-                      >
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
                         {msg.text}
                       </ReactMarkdown>
                     ) : (
-                      isStreaming && index === messages.length - 1 && (
+                      isStreaming && idx === messages.length - 1 && (
                         <div className="flex space-x-1 items-center mt-1">
-                          <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
-                          <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
-                          <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce"></div>
+                          <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce [animation-delay:-0.3s]" />
+                          <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce [animation-delay:-0.15s]" />
+                          <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" />
                         </div>
                       )
                     )}
@@ -419,18 +346,15 @@ const ChatUI = () => {
         {/* Input Area */}
         <div className="p-4 border-t border-gray-100/50 dark:border-gray-800/30 bg-white/40 dark:bg-[#1a1a1a]/40 backdrop-blur-sm">
           <div className="bg-[#f4f4f5]/60 dark:bg-[#27272a]/60 backdrop-blur-sm rounded-2xl p-2 transition-all duration-200 border border-transparent focus-within:border-gray-300/50 dark:focus-within:border-gray-600/50">
-            {/* Screenshot Previews */}
+
+            {/* Screenshot previews */}
             {screenshots.length > 0 && (
               <div className="flex flex-wrap gap-3 mb-3 ml-2 mt-2">
-                {screenshots.map((img, index) => (
-                  <div key={index} className="relative inline-block">
-                    <img
-                      src={img}
-                      alt={`Preview ${index}`}
-                      className="h-20 w-auto rounded-lg border border-black/10 shadow-sm"
-                    />
+                {screenshots.map((img, idx) => (
+                  <div key={idx} className="relative inline-block">
+                    <img src={img} alt={`Preview ${idx}`} className="h-20 w-auto rounded-lg border border-black/10 shadow-sm" />
                     <button
-                      onClick={() => setScreenshots((prev) => prev.filter((_, i) => i !== index))}
+                      onClick={() => setScreenshots((prev) => prev.filter((_, i) => i !== idx))}
                       className="absolute -top-2 -right-2 bg-gray-800 hover:bg-black text-white rounded-full p-1 shadow-md transition-colors"
                     >
                       <X size={12} />
@@ -451,14 +375,14 @@ const ChatUI = () => {
                     handleSend()
                   }
                 }}
-                placeholder={isTypingMode ? "Ghost Typing Active..." : "Ask AI a question..."}
-                className="w-full bg-transparent resize-none max-h-32 outline-none text-[15px] text-gray-800 dark:text-gray-200 px-3 py-2 placeholder-gray-400 dark:placeholder-gray-500"
-                rows={1}
-                style={{ minHeight: '44px' }}
                 onInput={(e) => {
                   e.target.style.height = 'auto'
                   e.target.style.height = e.target.scrollHeight + 'px'
                 }}
+                placeholder={isTypingMode ? 'Ghost Typing Active...' : 'Ask Gemini a question...'}
+                className="w-full bg-transparent resize-none max-h-32 outline-none text-[15px] text-gray-800 dark:text-gray-200 px-3 py-2 placeholder-gray-400 dark:placeholder-gray-500"
+                rows={1}
+                style={{ minHeight: '44px' }}
               />
               <button
                 onClick={handleSend}
@@ -468,14 +392,6 @@ const ChatUI = () => {
                 <Send size={18} />
               </button>
             </div>
-          </div>
-          <div className="text-center mt-2 flex flex-col items-center gap-1">
-            <span className="text-[11px] text-gray-400 dark:text-gray-500 font-medium">
-              Use <kbd className="px-1 bg-gray-100 dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700">Ctrl</kbd> + <kbd className="px-1 bg-gray-100 dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700">S</kbd> to attach a screenshot
-            </span>
-            <span className="text-[11px] text-gray-400 dark:text-gray-500 font-medium">
-              Press <kbd className="px-1 bg-gray-100 dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700">Ctrl</kbd> + <kbd className="px-1 bg-gray-100 dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700">T</kbd> to toggle Ghost Typing
-            </span>
           </div>
         </div>
       </div>

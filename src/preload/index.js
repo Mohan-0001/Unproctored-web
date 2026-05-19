@@ -1,26 +1,30 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
-// Custom APIs for renderer
-// const api = {
-//   onProtectionToggled: (callback) => ipcRenderer.on('protection-toggled', (_event, value) => callback(value)),
-//   onScreenshotCaptured: (callback) => ipcRenderer.on('screenshot-captured', (_event, value) => callback(value))
-// }
-
-const api = {
-  onProtectionToggled: (callback) => ipcRenderer.on('protection-toggled', (_event, value) => callback(value)),
-  onScreenshotCaptured: (callback) => ipcRenderer.on('screenshot-captured', (_event, value) => callback(value)),
-
-  onTypingModeToggled: (callback) => ipcRenderer.on('typing-mode-toggled', (_event, value) => callback(value)),
-  onUpdateText: (callback) => ipcRenderer.on('update-text', (_event, text) => callback(text)),
-  onTriggerSend: (callback) => ipcRenderer.on('trigger-send', () => callback()),
-  onScrollUI: (callback) => ipcRenderer.on('scroll-ui', (_event, amount) => callback(amount)),
-  resetTypingBuffer: () => ipcRenderer.send('reset-typing-buffer'),
+// Helper: attach a listener and return a cleanup function that removes it
+function on(channel, cb) {
+  const handler = (_event, ...args) => cb(...args)
+  ipcRenderer.on(channel, handler)
+  return () => ipcRenderer.removeListener(channel, handler)
 }
 
-// Use `contextBridge` APIs to expose Electron APIs to
-// renderer only if context isolation is enabled, otherwise
-// just add to the DOM global.
+const api = {
+  // ── Renderer ← Main events (each returns a cleanup fn) ─────────────────
+  onProtectionToggled:  (cb) => on('protection-toggled',  cb),
+  onScreenshotCaptured: (cb) => on('screenshot-captured', cb),
+  onTypingModeToggled:  (cb) => on('typing-mode-toggled', cb),
+  onUpdateText:         (cb) => on('update-text',         cb),
+  onTriggerSend:        (cb) => on('trigger-send',        cb),
+  onScrollUI:           (cb) => on('scroll-ui',           cb),
+
+  // ── Renderer → Main one-way ─────────────────────────────────────────────
+  resetTypingBuffer: () => ipcRenderer.send('reset-typing-buffer'),
+
+  // ── Settings two-way (invoke / handle) ──────────────────────────────────
+  loadSettings:  ()         => ipcRenderer.invoke('load-settings'),
+  saveSettings:  (settings) => ipcRenderer.invoke('save-settings', settings)
+}
+
 if (process.contextIsolated) {
   try {
     contextBridge.exposeInMainWorld('electron', electronAPI)

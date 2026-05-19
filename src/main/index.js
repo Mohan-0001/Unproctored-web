@@ -2,14 +2,18 @@ import { app, shell, BrowserWindow, ipcMain, desktopCapturer, globalShortcut } f
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
+import { loadSettings, saveSettings } from './store'
 const { uIOhook, UiohookKey } = require('uiohook-napi')
 
+// ─── State ───────────────────────────────────────────────────────────────────
+let mainWindow
+let isTypingMode = false
+let capturedText = ''
+let isScreenProtected = false
+let currentSettings = null // loaded after app ready
+let capsLockOn = false
 
-let mainWindow;
-let isTypingMode = false;
-let capturedText = '';
-
-// Mapping native scan codes to characters
+// ─── Key map (scan code → char) ──────────────────────────────────────────────
 const keyMap = {
   [UiohookKey.A]: 'a', [UiohookKey.B]: 'b', [UiohookKey.C]: 'c', [UiohookKey.D]: 'd',
   [UiohookKey.E]: 'e', [UiohookKey.F]: 'f', [UiohookKey.G]: 'g', [UiohookKey.H]: 'h',
@@ -18,17 +22,120 @@ const keyMap = {
   [UiohookKey.Q]: 'q', [UiohookKey.R]: 'r', [UiohookKey.S]: 's', [UiohookKey.T]: 't',
   [UiohookKey.U]: 'u', [UiohookKey.V]: 'v', [UiohookKey.W]: 'w', [UiohookKey.X]: 'x',
   [UiohookKey.Y]: 'y', [UiohookKey.Z]: 'z', [UiohookKey.Space]: ' ',
-  [UiohookKey['1']]: '1', [UiohookKey['2']]: '2', [UiohookKey['3']]: '3', [UiohookKey['4']]: '4',
-  [UiohookKey['5']]: '5', [UiohookKey['6']]: '6', [UiohookKey['7']]: '7', [UiohookKey['8']]: '8',
-  [UiohookKey['9']]: '9', [UiohookKey['0']]: '0',
+  [UiohookKey['1']]: '1', [UiohookKey['2']]: '2', [UiohookKey['3']]: '3',
+  [UiohookKey['4']]: '4', [UiohookKey['5']]: '5', [UiohookKey['6']]: '6',
+  [UiohookKey['7']]: '7', [UiohookKey['8']]: '8', [UiohookKey['9']]: '9',
+  [UiohookKey['0']]: '0',
   [UiohookKey.Comma]: ',', [UiohookKey.Period]: '.', [UiohookKey.Slash]: '/',
   [UiohookKey.Semicolon]: ';', [UiohookKey.Quote]: "'", [UiohookKey.BracketLeft]: '[',
   [UiohookKey.BracketRight]: ']', [UiohookKey.Backslash]: '\\', [UiohookKey.Minus]: '-',
-  [UiohookKey.Equal]: '=', [UiohookKey.Backquote]: '`',
-};
+  [UiohookKey.Equal]: '=', [UiohookKey.Backquote]: '`'
+}
 
+const shiftKeyMap = {
+  '1': '!', '2': '@', '3': '#', '4': '$', '5': '%', '6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
+  '-': '_', '=': '+', '[': '{', ']': '}', '\\': '|', ';': ':', "'": '"', ',': '<', '.': '>', '/': '?', '`': '~'
+}
+
+// ─── Shortcut action handlers ─────────────────────────────────────────────────
+const moveWindow = (dx, dy) => {
+  if (!mainWindow) return
+  const [x, y] = mainWindow.getPosition()
+  mainWindow.setPosition(x + dx, y + dy)
+}
+
+const ghostModeHandler = () => {
+  isScreenProtected = !isScreenProtected
+  if (mainWindow) {
+    mainWindow.setIgnoreMouseEvents(isScreenProtected)
+    mainWindow.webContents.send('protection-toggled', isScreenProtected)
+  }
+}
+
+const sendMessageHandler = () => {
+  if (mainWindow) {
+    capturedText = ''
+    mainWindow.webContents.send('trigger-send')
+  }
+}
+
+const captureScreenHandler = async () => {
+  try {
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: 1920, height: 1080 }
+    })
+    if (sources && sources.length > 0 && mainWindow) {
+      mainWindow.webContents.send('screenshot-captured', sources[0].thumbnail.toDataURL())
+    }
+  } catch (err) {
+    console.error('[main] captureScreen error:', err)
+  }
+}
+
+const ghostTypingHandler = () => {
+  isTypingMode = !isTypingMode
+  if (isTypingMode) {
+    capturedText = ''
+    uIOhook.start()
+  } else {
+    uIOhook.stop()
+  }
+  mainWindow?.webContents.send('typing-mode-toggled', isTypingMode)
+}
+
+const toggleVisibilityHandler = () => {
+  if (!mainWindow) return
+  if (mainWindow.isVisible()) {
+    mainWindow.hide()
+  } else {
+    mainWindow.setAlwaysOnTop(true, 'screen-saver')
+    mainWindow.showInactive()
+    mainWindow.setSkipTaskbar(true)
+  }
+}
+
+const quitAppHandler = () => app.quit()
+
+// ─── Dynamic shortcut registration ───────────────────────────────────────────
+const registeredShortcuts = new Set()
+
+function unregisterAll() {
+  registeredShortcuts.forEach((sc) => {
+    try { globalShortcut.unregister(sc) } catch (_) {}
+  })
+  registeredShortcuts.clear()
+}
+
+function register(combo, handler) {
+  if (!combo) return
+  try {
+    const ok = globalShortcut.register(combo, handler)
+    if (ok) registeredShortcuts.add(combo)
+    else console.warn('[shortcuts] failed to register:', combo)
+  } catch (err) {
+    console.error('[shortcuts] error registering', combo, err)
+  }
+}
+
+function registerAllShortcuts(sc) {
+  unregisterAll()
+  register(sc.moveUp, () => moveWindow(0, -15))
+  register(sc.moveDown, () => moveWindow(0, 15))
+  register(sc.moveLeft, () => moveWindow(-15, 0))
+  register(sc.moveRight, () => moveWindow(15, 0))
+  register(sc.ghostMode, ghostModeHandler)
+  register(sc.sendMessage, sendMessageHandler)
+  register(sc.captureScreen, captureScreenHandler)
+  register(sc.ghostTyping, ghostTypingHandler)
+  register(sc.toggleVisibility, toggleVisibilityHandler)
+  register(sc.scrollUp, () => mainWindow?.webContents.send('scroll-ui', -50))
+  register(sc.scrollDown, () => mainWindow?.webContents.send('scroll-ui', 50))
+  register(sc.quitApp, quitAppHandler)
+}
+
+// ─── Window creation ──────────────────────────────────────────────────────────
 function createWindow() {
-  // Create the browser window.
   mainWindow = new BrowserWindow({
     width: 725,
     height: 495,
@@ -45,7 +152,6 @@ function createWindow() {
     }
   })
 
-
   mainWindow.setAlwaysOnTop(true, 'screen')
 
   if (process.platform === 'darwin') {
@@ -54,17 +160,13 @@ function createWindow() {
     mainWindow.setContentProtection(true)
   }
 
-  mainWindow.on('ready-to-show', () => {
-    mainWindow.show()
-  })
+  mainWindow.on('ready-to-show', () => mainWindow.show())
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: 'deny' }
   })
 
-  // HMR for renderer base on electron-vite cli.
-  // Load the remote URL for development or the local html file for production.
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
@@ -72,188 +174,104 @@ function createWindow() {
   }
 }
 
-// This method will be called when Electron has finished
-// initialization and is ready to create browser windows.
-// Some APIs can only be used after this event occurs.
+// ─── App lifecycle ────────────────────────────────────────────────────────────
 app.whenReady().then(() => {
-  // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron')
 
-  // Default open or close DevTools by F12 in development
-  // and ignore CommandOrControl + R in production.
-  // see https://github.com/alex8088/electron-toolkit/tree/master/packages/utils
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
   })
 
-  // IPC test
+  // Load persisted settings and register shortcuts
+  currentSettings = loadSettings()
+  registerAllShortcuts(currentSettings.shortcuts)
+
+  createWindow()
+
+  // ── IPC: ping test ────────────────────────────────────────────────────────
   ipcMain.on('ping', () => console.log('pong'))
 
+  // ── IPC: reset typing buffer ──────────────────────────────────────────────
+  ipcMain.on('reset-typing-buffer', () => { capturedText = '' })
+
+  // ── IPC: capture screen (on-demand) ──────────────────────────────────────
   ipcMain.handle('capture-screen', async () => {
     try {
       const sources = await desktopCapturer.getSources({
         types: ['screen'],
         thumbnailSize: { width: 1920, height: 1080 }
       })
-      if (sources && sources.length > 0) {
-        return sources[0].thumbnail.toDataURL()
-      }
-      return null
+      return sources?.length > 0 ? sources[0].thumbnail.toDataURL() : null
     } catch (err) {
-      console.error('Error capturing screen:', err)
+      console.error('[main] capture-screen IPC error:', err)
       return null
     }
   })
 
-  createWindow()
-
-  const moveWindow = (dx, dy) => {
-    if (mainWindow) {
-      const [x, y] = mainWindow.getPosition()
-      mainWindow.setPosition(x + dx, y + dy)
-    }
-  }
-
-  globalShortcut.register('CommandOrControl+Up', () => moveWindow(0, -15))
-  globalShortcut.register('CommandOrControl+Down', () => moveWindow(0, 15))
-  globalShortcut.register('CommandOrControl+Left', () => moveWindow(-15, 0))
-  globalShortcut.register('CommandOrControl+Right', () => moveWindow(15, 0))
-
-  let isScreenProtected = false
-  globalShortcut.register('CommandOrControl+H', () => {
-    isScreenProtected = !isScreenProtected
-    if (mainWindow) {
-      // mainWindow.setContentProtection(isScreenProtected)
-      mainWindow.setIgnoreMouseEvents(isScreenProtected);
-      mainWindow.webContents.send('protection-toggled', isScreenProtected)
-    }
+  // ── IPC: load settings ────────────────────────────────────────────────────
+  ipcMain.handle('load-settings', () => {
+    currentSettings = loadSettings()
+    return currentSettings
   })
 
-  // globalShortcut.register('CommandOrControl+Enter', () => {
-  //   if (mainWindow) {
-  //     mainWindow.webContents.send('trigger-send')
-  //   }
-  // })
-
-  globalShortcut.register('CommandOrControl+Enter', () => {
-    if (mainWindow) {
-      capturedText = ''; // Clear memory immediately
-      mainWindow.webContents.send('trigger-send')
-    }
-  })
-
-  globalShortcut.register('Shift+Up', () => {
-    if (mainWindow) {
-      mainWindow.webContents.send('scroll-ui', -50)
-    }
-  })
-
-  globalShortcut.register('Shift+Down', () => {
-    if (mainWindow) {
-      mainWindow.webContents.send('scroll-ui', 50)
-    }
-  })
-
-  globalShortcut.register('CommandOrControl+M', () => {
-    if (!mainWindow) return;
-
-    if (mainWindow.isVisible()) {
-      mainWindow.hide();
-
-    } else {
-      // 1. Set the level BEFORE showing to ensure it stays on top of Chrome
-      mainWindow.setAlwaysOnTop(true, 'screen-saver');
-
-      // 2. Show without stealing focus
-      mainWindow.showInactive();
-
-      // 3. Ensure it doesn't show in the taskbar
-      mainWindow.setSkipTaskbar(true);
-
-      // 4. Start listening for keys again
-    }
-  });
-
-  ipcMain.on('reset-typing-buffer', () => {
-    capturedText = '';
-  });
-
-  globalShortcut.register('CommandOrControl+S', async () => {
+  // ── IPC: save settings + re-register shortcuts ────────────────────────────
+  ipcMain.handle('save-settings', async (_, settings) => {
     try {
-      const sources = await desktopCapturer.getSources({
-        types: ['screen'],
-        thumbnailSize: { width: 1920, height: 1080 }
-      })
-      if (sources && sources.length > 0 && mainWindow) {
-        const imgDataUrl = sources[0].thumbnail.toDataURL()
-        mainWindow.webContents.send('screenshot-captured', imgDataUrl)
+      const ok = saveSettings(settings)
+      if (ok) {
+        currentSettings = settings
+        registerAllShortcuts(settings.shortcuts)
       }
+      return { success: ok }
     } catch (err) {
-      console.error('Error capturing screen in global shortcut:', err)
+      console.error('[main] save-settings error:', err)
+      return { success: false, error: err.message }
     }
   })
 
-
-  globalShortcut.register('CommandOrControl+T', () => {
-    isTypingMode = !isTypingMode;
-
-    if (isTypingMode) {
-      console.log("🔴 Mode: ON (Capturing keys)");
-      capturedText = ''; // Reset buffer when starting
-      uIOhook.start();
-    } else {
-      console.log("🟢 Mode: OFF. Final Text:", capturedText);
-      uIOhook.stop();
-    }
-
-    if (mainWindow) {
-      mainWindow.webContents.send('typing-mode-toggled', isTypingMode);
-    }
-  });
-
+  // ── Ghost typing key capture ──────────────────────────────────────────────
   uIOhook.on('keydown', (e) => {
-    if (!isTypingMode) return;
-
-    // Handle Backspace
+    if (!isTypingMode) return
     if (e.keycode === UiohookKey.Backspace) {
-      capturedText = capturedText.slice(0, -1);
+      capturedText = capturedText.slice(0, -1)
     } else if (e.keycode === UiohookKey.Enter) {
-      // Optional: Handle Enter if needed, or ignore
-      // capturedText += '\n'; 
+      if (e.shiftKey) {
+        capturedText += '\n'
+      }
+    } else if (e.keycode === UiohookKey.Tab) {
+      capturedText += '    '
+    } else if (e.keycode === UiohookKey.CapsLock) {
+      capsLockOn = !capsLockOn
     } else {
-      let char = keyMap[e.keycode];
+      let char = keyMap[e.keycode]
       if (char) {
-        if (e.shiftKey) char = char.toUpperCase();
-        capturedText += char;
+        if (e.shiftKey) {
+          if (shiftKeyMap[char]) {
+            char = shiftKeyMap[char]
+          } else if (/[a-z]/.test(char)) {
+            char = capsLockOn ? char.toLowerCase() : char.toUpperCase()
+          }
+        } else {
+          if (/[a-z]/.test(char) && capsLockOn) {
+            char = char.toUpperCase()
+          }
+        }
+        capturedText += char
       }
     }
+    mainWindow?.webContents.send('update-text', capturedText)
+  })
 
-    // Update the UI with the full captured buffer
-    if (mainWindow) {
-      mainWindow.webContents.send('update-text', capturedText);
-    }
-  });
-
-  app.on('activate', function () {
-    // On macOS it's common to re-create a window in the app when the
-    // dock icon is clicked and there are no other windows open.
+  app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 })
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
-  uIOhook.stop();
+  uIOhook.stop()
 })
 
-// Quit when all windows are closed, except on macOS. There, it's common
-// for applications and their menu bar to stay active until the user quits
-// explicitly with Cmd + Q.
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit()
-  }
+  if (process.platform !== 'darwin') app.quit()
 })
-
-// In this file you can include the rest of your app's specific main process
-// code. You can also put them in separate files and require them here.
