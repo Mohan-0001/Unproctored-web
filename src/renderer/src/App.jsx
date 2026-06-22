@@ -4,9 +4,9 @@ import Settings from './components/Settings'
 
 function App() {
   const [isDarkMode, setIsDarkMode] = useState(false)
-  const [view, setView] = useState('chat') // 'chat' | 'settings'
+  const [view, setView] = useState('chat') 
 
-  // Single source of truth for dark mode — applied here, passed as prop
+  
   useEffect(() => {
     if (isDarkMode) {
       document.documentElement.classList.add('dark')
