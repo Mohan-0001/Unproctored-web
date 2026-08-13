@@ -2,7 +2,7 @@ import { app, shell, BrowserWindow, ipcMain, desktopCapturer, globalShortcut } f
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
-import { loadSettings, saveSettings } from './store'
+import { loadSettings, saveSettings, loadHistory, saveHistory, clearHistory } from './store'
 const { uIOhook, UiohookKey } = require('uiohook-napi')
 
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -148,7 +148,8 @@ function createWindow() {
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false
+      sandbox: false,
+      webSecurity: false
     }
   })
 
@@ -227,6 +228,23 @@ app.whenReady().then(() => {
       console.error('[main] save-settings error:', err)
       return { success: false, error: err.message }
     }
+  })
+
+  // ── IPC: load conversation history ────────────────────────────────────────
+  ipcMain.handle('load-history', () => {
+    return loadHistory()
+  })
+
+  // ── IPC: save conversation history ────────────────────────────────────────
+  ipcMain.handle('save-history', async (_, messages) => {
+    const ok = saveHistory(messages)
+    return { success: ok }
+  })
+
+  // ── IPC: clear conversation history ───────────────────────────────────────
+  ipcMain.handle('clear-history', () => {
+    const ok = clearHistory()
+    return { success: ok }
   })
 
   // ── Ghost typing key capture ──────────────────────────────────────────────

@@ -22,7 +22,12 @@ const api = {
 
   // ── Settings two-way (invoke / handle) ──────────────────────────────────
   loadSettings:  ()         => ipcRenderer.invoke('load-settings'),
-  saveSettings:  (settings) => ipcRenderer.invoke('save-settings', settings)
+  saveSettings:  (settings) => ipcRenderer.invoke('save-settings', settings),
+
+  // ── History two-way (invoke / handle) ───────────────────────────────────
+  loadHistory:  ()         => ipcRenderer.invoke('load-history'),
+  saveHistory:  (messages) => ipcRenderer.invoke('save-history', messages),
+  clearHistory: ()         => ipcRenderer.invoke('clear-history')
 }
 
 if (process.contextIsolated) {

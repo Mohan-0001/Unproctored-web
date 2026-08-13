@@ -4,7 +4,8 @@ import { DEFAULT_SHORTCUTS } from '../constants/shortcuts'
 export function useSettings() {
   const [loading, setLoading] = useState(true)
   const [storedSettings, setStoredSettings] = useState({
-    geminiApiKeys: ['', ''],
+    geminiApiKeys: ['', '', '', ''],
+    openaiApiKeys: ['', '', '', ''],
     shortcuts: { ...DEFAULT_SHORTCUTS }
   })
 

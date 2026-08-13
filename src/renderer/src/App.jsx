@@ -18,20 +18,22 @@ function App() {
   const toggleDark = () => setIsDarkMode((d) => !d)
 
   return (
-    <div className="h-screen w-full">
-      {view === 'chat' ? (
+    <div className="h-screen w-full relative">
+      <div className={view === 'chat' ? 'h-full w-full' : 'hidden'}>
         <ChatUI
           isDarkMode={isDarkMode}
           onToggleDark={toggleDark}
           onOpenSettings={() => setView('settings')}
+          activeView={view}
         />
-      ) : (
+      </div>
+      <div className={view === 'settings' ? 'h-full w-full' : 'hidden'}>
         <Settings
           isDarkMode={isDarkMode}
           onToggleDark={toggleDark}
           onClose={() => setView('chat')}
         />
-      )}
+      </div>
     </div>
   )
 }

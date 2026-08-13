@@ -62,13 +62,14 @@ const Settings = ({ isDarkMode, onToggleDark, onClose }) => {
                 App Settings
               </h1>
               <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-                Configure your Gemini API keys and global keyboard shortcuts
+                Configure your Gemini & OpenAI API keys and global keyboard shortcuts
               </p>
             </div>
 
             {}
             <ApiKeysSection
-              initialKeys={storedSettings.geminiApiKeys}
+              initialGeminiKeys={storedSettings.geminiApiKeys}
+              initialOpenaiKeys={storedSettings.openaiApiKeys}
               onSaved={mergeSettings}
             />
 
